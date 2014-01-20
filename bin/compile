@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+
+set -e            # fail fast
+set -o pipefail   # don't ignore exit codes when piping output
+# set -x          # enable debugging
+
+# Configure directories
+build_dir=$1
+cache_dir=$2
+env_file=$3
+
+bp_dir=$(cd $(dirname $0); cd ..; pwd)
+
+# Load some convenience functions like status(), echo(), and indent()
+source $bp_dir/bin/common.sh
+
+# Output npm debug info on error
+trap cat_npm_debug_log ERR
+
+# DEBUGGING
+# rm -rf $cache_dir/node_modules
+
+code_dir="$(mktmpdir node)"
+
+# move app code to a temp staging area
+(
+  mv $build_dir/* $build_dir/.[!.]* $build_dir/..?* $code_dir/
+) &
+
+
+# create a package.json
+cat > "$build_dir"/package.json <<EOF
+{
+  "name": "meteor-app",
+  "version": "0.0.0",
+  "description": "Your Meteor App on Heroku",
+  "engines":{
+    "node": "0.10.x"
+  },
+  "repository": "https://github.com/johnnypez/heroku-buildpack-mrt.git",
+  "author": "johnnypez@gmail.com",
+  "license": "BSD",
+  "dependencies":{
+    "meteorite": ""
+  }
+}
+EOF
+
+cat > $build_dir/README.md <<EOF
+  Dummy README to shut NPM up
+EOF
+
+# Look in package.json's engines.node field for a semver range
+semver_range=$(cat $build_dir/package.json | $bp_dir/vendor/jq -r .engines.node)
+
+# Resolve node version using semver.io
+node_version=$(curl --silent --get --data-urlencode "range=${semver_range}" https://semver.io/node/resolve)
+
+# Output info about requested range and resolved node version
+status "Requested node range:  $semver_range"
+status "Resolved node version: $node_version"
+
+# Download node from Heroku's S3 mirror of nodejs.org/dist
+status "Downloading and installing node"
+node_url="http://s3pository.heroku.com/node/v$node_version/node-v$node_version-linux-x64.tar.gz"
+curl $node_url -s -o - | tar xzf - -C $build_dir
+
+# Move node (and npm) into ./vendor and make them executable
+mkdir -p $build_dir/vendor
+mv $build_dir/node-v$node_version-linux-x64 $build_dir/vendor/node
+chmod +x $build_dir/vendor/node/bin/*
+PATH=$PATH:$build_dir/vendor/node/bin
+
+# Run subsequent node/npm commands from the build path
+cd $build_dir
+
+# If node_modules directory is checked into source control then
+# rebuild any native deps. Otherwise, restore from the build cache.
+if test -d $build_dir/node_modules; then
+  status "Found existing node_modules directory; skipping cache"
+  status "Rebuilding any native dependencies"
+  npm rebuild 2>&1 | indent
+elif test -d $cache_dir/node_modules; then
+  status "Restoring node_modules directory from cache"
+  cp -r $cache_dir/node_modules $build_dir/
+
+  status "Pruning cached dependencies not specified in package.json"
+  npm prune 2>&1 | indent
+fi
+
+# Scope config var availability only to `npm install`
+(
+  if [ "$env_file" ]; then
+    status "Importing application config vars"
+    export $(egrep -v "^(PATH|GIT_DIR|CPATH|CPPATH|LD_PRELOAD|LIBRARY_PATH)" "$env_file")
+  fi
+
+  status "Installing dependencies"
+  # Make npm output to STDOUT instead of its default STDERR
+  npm install --userconfig $build_dir/.npmrc --production 2>&1 | indent
+)
+
+PATH=$PATH:$build_dir/vendor/node/bin:$build_dir/node_modules/.bin
+
+if test -d $cache_dir/.meteorite; then
+  echo "Restoring cached .meteorite directory" | indent
+  cp -r $cache_dir/.meteorite $build_dir/
+fi
+
+cd $code_dir
+status "Installing packages"
+unset GIT_DIR
+HOME=$build_dir mrt install | indent
+
+status "Caching .meteorite directory"
+rm -rf $cache_dir/.meteorite
+mkdir -p $cache_dir/.meteorite
+test -d $build_dir/.meteorite && cp -r $build_dir/.meteorite $cache_dir/
+
+meteor_dir=$cache_dir/meteor
+if test -d $meteor_dir/.meteor; then
+  status "Meteor is already installed... checking for updates"
+  HOME=$meteor_dir $meteor_dir/.meteor/meteor update | indent
+else
+  status "Installing meteor"
+  cd $build_dir
+  mkdir $meteor_dir
+  curl https://install.meteor.com | HOME="$meteor_dir" sh | indent
+  echo "Meteor installed" | indent
+fi
+
+status "Building meteor bundle"
+meteor_build=$build_dir/build
+mkdir -p $meteor_build
+cd $code_dir
+HOME=$meteor_dir $meteor_dir/.meteor/meteor bundle $build_dir/bundle.tar.gz 2>&1 | indent
+
+tar -zxf $build_dir/bundle.tar.gz --strip-components 1 -C $meteor_build
+rm "$build_dir"/bundle.tar.gz
+
+status "Let's kick the tyres and light the fires big daddy!"
+
+status "Caching node_modules directory for future builds"
+rm -rf $cache_dir/node_modules
+mkdir -p $cache_dir
+test -d $build_dir/node_modules && cp -r $build_dir/node_modules $cache_dir/
+
+status "Cleaning up node-gyp and npm artifacts"
+rm -rf "$build_dir/.node-gyp"
+rm -rf "$build_dir/.npm"
+
+# Update the PATH
+status "Building runtime environment"
+mkdir -p $build_dir/.profile.d
+echo "export PATH=\"\$HOME/vendor/node/bin:\$HOME/bin:\$HOME/.node_modules/.bin:\$PATH\";" > $build_dir/.profile.d/nodejs.sh
+
+# set up mongo_url
+cat > "$build_dir"/.profile.d/mongo.sh <<EOF
+  #!/bin/sh
+
+  export MONGO_URL=\${MONGO_URL:-\$MONGOLAB_URI};
+EOF
+
+# Post package.json to nomnom service
+# Use a subshell so failures won't break the build.
+(
+  curl \
+    --data @$build_dir/package.json \
+    --fail \
+    --silent \
+    --request POST \
+    --header "content-type: application/json" \
+    https://nomnom.heroku.com/?request_id=$REQUEST_ID \
+    > /dev/null
+) &

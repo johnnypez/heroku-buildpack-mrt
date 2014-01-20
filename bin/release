@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# bin/release <build-dir>
+cat << EOF
+addons:
+  - mongolab:sandbox
+default_process_types:
+  web: node build/main.js
+EOF
