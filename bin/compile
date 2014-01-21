@@ -24,7 +24,9 @@ code_dir="$(mktmpdir node)"
 
 # move app code to a temp staging area
 status "isolating application code"
-mv * .??* $code_dir/
+for x in $build_dir/* $build_dir/.[!.]* $build_dir/..?*; do
+  if [ -e "$x" ]; then mv -- "$x" $code_dir/
+done
 
 
 # create a package.json
