@@ -25,7 +25,9 @@ code_dir="$(mktmpdir node)"
 # move app code to a temp staging area
 status "isolating application code"
 for x in $build_dir/* $build_dir/.[!.]* $build_dir/..?*; do
-  if [ -e "$x" ]; then mv -- "$x" $code_dir/
+  if [ -e "$x" ]; then
+    mv -- "$x" $code_dir/
+  fi
 done
 
 
