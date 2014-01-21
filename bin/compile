@@ -132,16 +132,15 @@ else
   echo "Meteor installed" | indent
 fi
 
-status "Building meteor bundle"
+status "Building meteor bundle..."
 meteor_build=$build_dir/build
 mkdir -p $meteor_build
 cd $code_dir
 HOME=$meteor_dir $meteor_dir/.meteor/meteor bundle $build_dir/bundle.tar.gz 2>&1 | indent
-
+# extract the bundle into the $meteor_build target dir and get rid of the archive
 tar -zxf $build_dir/bundle.tar.gz --strip-components 1 -C $meteor_build
 rm "$build_dir"/bundle.tar.gz
-
-status "Let's kick the tyres and light the fires big daddy!"
+echo "done" | indent
 
 status "Caching node_modules directory for future builds"
 rm -rf $cache_dir/node_modules
@@ -163,6 +162,8 @@ cat > "$build_dir"/.profile.d/mongo.sh <<EOF
 
   export MONGO_URL=\${MONGO_URL:-\$MONGOLAB_URI};
 EOF
+
+status "Let's kick the tyres and light the fires big daddy!"
 
 # Post package.json to nomnom service
 # Use a subshell so failures won't break the build.
