@@ -23,9 +23,8 @@ trap cat_npm_debug_log ERR
 code_dir="$(mktmpdir node)"
 
 # move app code to a temp staging area
-(
-  mv $build_dir/* $build_dir/.[!.]* $build_dir/..?* $code_dir/
-) &
+status "isolating application code"
+mv * .??* $code_dir/
 
 
 # create a package.json
